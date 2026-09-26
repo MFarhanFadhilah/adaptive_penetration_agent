@@ -1,0 +1,17 @@
+[Unit]
+Description=CTF Agent Memory webapp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+User=ctf
+WorkingDirectory=/opt/ctf
+Environment=HOST=127.0.0.1
+Environment=PORT=8765
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ctf/.venv/bin/python webapp/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

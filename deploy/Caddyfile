@@ -1,0 +1,6 @@
+# Serves the webapp on port 80 of the Droplet's IP.
+# With a domain pointed at the Droplet, replace ":80" with the domain
+# (e.g. "ctf.example.com") and Caddy gets an HTTPS certificate automatically.
+:80 {
+	reverse_proxy 127.0.0.1:8765
+}

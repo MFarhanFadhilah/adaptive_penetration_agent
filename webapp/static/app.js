@@ -1,6 +1,8 @@
 let selectedChallenge = null;
 let evtSource = null;
 let series = { naive: [], memory: [] };
+let runPasswordRequired = false;
+let runPassword = "";
 
 function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString();
@@ -19,6 +21,7 @@ async function refreshStatus() {
       atlasBadge.textContent = "Atlas: disconnected";
       atlasBadge.className = "badge badge-bad";
     }
+    runPasswordRequired = !!s.run_password_required;
     gwBadge.textContent = s.ai_gateway_configured ? "AI Gateway: configured (best-effort)" : "AI Gateway: not configured (scripted reasoning)";
     gwBadge.className = "badge " + (s.ai_gateway_configured ? "badge-ok" : "badge-pending");
   } catch (e) {
@@ -194,13 +197,18 @@ function runReal() {
   if (!confirm(`Run the real agent on ${selectedChallenge.name}?
 
 This starts Docker containers and uses your OpenAI API key (budget: $${maxCost}). It can take several minutes.`)) return;
+  if (runPasswordRequired && !runPassword) {
+    runPassword = prompt("Run password (set by the server owner):") || "";
+    if (!runPassword) return;
+  }
   document.getElementById("log").innerHTML = "";
   document.getElementById("summary-card").hidden = true;
   resetChart();
   memorySnapshot = currentMemory.map((d) => ({ ...d }));
   setRunButtons(true);
 
-  evtSource = new EventSource(`/api/run/stream?challenge=${encodeURIComponent(selectedChallenge.id)}&max_cost=${encodeURIComponent(maxCost)}`);
+  evtSource = new EventSource(`/api/run/stream?challenge=${encodeURIComponent(selectedChallenge.id)}` +
+    `&max_cost=${encodeURIComponent(maxCost)}&password=${encodeURIComponent(runPassword)}`);
   let finished = false;
 
   const finish = () => {
@@ -222,6 +230,7 @@ This starts Docker containers and uses your OpenAI API key (budget: $${maxCost})
   evtSource.addEventListener("failed", (e) => {
     const d = JSON.parse(e.data);
     log(`<span style="color:#f56565"><b>Cannot run:</b> ${escapeHtml(d.message)}</span>`);
+    if (d.message === "Wrong run password.") runPassword = "";
     finish();
   });
 

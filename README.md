@@ -57,6 +57,59 @@ python3 mongo/setup_atlas.py --keys keys.cfg
 python3 run_rag.py --challenge <name> --split development --rag-mode mongo_rag
 ```
 
+## Deploy on DigitalOcean
+
+Runs the webapp 24/7 on a Droplet, including **Run real agent** (the agent needs
+a Docker daemon, which platforms like Railway or Render don't provide).
+
+**1. Create the Droplet.** Ubuntu 24.04 LTS, Regular/Premium Intel or AMD
+(x86 — the agent image is `linux/amd64`), at least 2 vCPU / 4 GB RAM (8 GB
+recommended), 50 GB disk, region close to your Atlas cluster. Add your SSH key.
+
+**2. Allow the Droplet in Atlas.** Atlas → Network Access → add the Droplet's
+public IP.
+
+**3. Clone the repo and write `keys.cfg`** (SSH in as root):
+
+```bash
+git clone https://github.com/MFarhanFadhilah/adaptive_penetration_agent.git /opt/ctf
+nano /opt/ctf/keys.cfg
+```
+
+For a private repo, clone with a GitHub personal access token as the password.
+`keys.cfg`:
+
+```
+MONGODB_URI=mongodb+srv://...
+OPENAI=sk-...
+RUN_PASSWORD=choose-a-password
+```
+
+`RUN_PASSWORD` is asked for before each real agent run, so visitors can't spend
+your OpenAI credit. Leave it out only on a private machine.
+
+**4. Run the setup script** (installs Docker, Python deps, the dataset index,
+builds the agent image, starts the webapp as a service behind Caddy, opens the
+firewall; 15–25 min the first time, safe to re-run):
+
+```bash
+bash /opt/ctf/deploy/setup_droplet.sh
+```
+
+**5. Open** `http://<droplet-ip>/`. For HTTPS, point a domain at the Droplet,
+replace `:80` with the domain in `/etc/caddy/Caddyfile`, then
+`systemctl reload caddy`.
+
+**Day-to-day:**
+
+```bash
+journalctl -u ctf-webapp -f                            # live logs
+cd /opt/ctf && sudo -u ctf git pull && systemctl restart ctf-webapp   # deploy updates
+```
+
+The Droplet is billed while it exists, even when powered off — destroy it
+after the event if you don't need it.
+
 ## Roadmap
 
 1. **Core** — the multi-agent harness with in-memory RAG (`self_rag`,

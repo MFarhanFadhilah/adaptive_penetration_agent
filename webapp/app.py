@@ -19,6 +19,7 @@ Run from the llm_ctf_automation directory:
     python3 webapp/app.py
 Then open http://localhost:8765
 """
+import hmac
 import json
 import os
 import random
@@ -175,6 +176,7 @@ def api_status():
         "db": "pentest_memory",
         "collections": counts,
         "ai_gateway_configured": ai_gateway is not None,
+        "run_password_required": bool(keys.get("RUN_PASSWORD")),
     })
 
 
@@ -401,6 +403,10 @@ def api_run_stream():
     challenge = CHALLENGES_BY_ID.get(request.args.get("challenge", ""))
     if challenge is None:
         return jsonify({"error": "unknown challenge id"}), 404
+    # On a public server, RUN_PASSWORD in keys.cfg stops strangers spending your OpenAI credit
+    run_password = keys.get("RUN_PASSWORD", "")
+    if run_password and not hmac.compare_digest(request.args.get("password", ""), run_password):
+        return Response(sse("failed", {"message": "Wrong run password."}), mimetype="text/event-stream")
     try:
         max_cost = min(max(float(request.args.get("max_cost", 1.0)), 0.05), REAL_AGENT_MAX_COST_CAP)
     except ValueError:
@@ -458,4 +464,6 @@ def api_run_stream():
 if __name__ == "__main__":
     print(f"Loaded {len(CHALLENGES)} NYU CTF challenges for the demo.")
     print(f"AI Gateway configured: {ai_gateway is not None}")
-    app.run(host="127.0.0.1", port=8765, debug=False, threaded=True)
+    # HOST=0.0.0.0 exposes it directly; on a server keep 127.0.0.1 behind the reverse proxy
+    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 8765)),
+            debug=False, threaded=True)
