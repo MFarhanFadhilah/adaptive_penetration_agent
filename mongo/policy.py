@@ -1,89 +1,112 @@
 """
-Self-tuning policy for Mongo-RAG.
+Self-tuning policy document: replaces the static YAML in
+configs/rag/self_rag_config.yaml with a live MongoDB document the harness
+reads at startup and can rewrite based on measured outcomes -- not code,
+not a config file someone has to edit by hand.
 
-The `policy` collection holds one evolving document per profile:
-  - POLICY_REAL ("global"): the actual harness reads this at startup (see
-    run_rag.py's `resolve_setting` precedence: CLI > policy > YAML > default).
-  - POLICY_DEMO ("demo"): a separate, lower-stakes profile the demo webapp can
-    tune independently without touching the real harness's settings.
+There are two independent policy documents in the `policy` collection, so the
+demo webapp can never retune the real agent:
 
-After each episode, update_policy() looks at the rolling average token usage
-of recent `runs` against the policy's `token_budget` and nudges the policy:
-  - Usage comfortably over budget -> tighten: smaller top_k and
-    truncate_content_chars (less context per hint, less noise) and inject
-    hints more often, to try to bring cost down.
-  - Usage comfortably under budget -> relax back toward the defaults.
+  _id "global" -- the real CTF agent (run_rag.py --rag-mode mongo_rag);
+                  tuned only from real runs in `runs`
+  _id "demo"   -- the demo webapp; tuned only from runs marked simulated=True
 
-This gives the harness closed-loop feedback without a human editing YAML
-between runs, and is exactly what mongo/setup_atlas.py's health check reads
-back (policy["token_budget"], policy["version"]).
+Each document carries its own `token_budget`, editable live in Atlas.
 """
 import time
+from pymongo.collection import Collection
 
 POLICY_REAL = "global"
 POLICY_DEMO = "demo"
 
 DEFAULT_POLICY = {
     "version": 1,
-    "token_budget": 40_000,
-    "alpha": 0.6,
-    "beta": 0.4,
     "rag_top_k": 3,
     "rag_inject_every": 3,
-    "truncate_content_chars": None,
+    "truncate_content_chars": 25000,
+    "alpha": 0.6,   # weight on semantic similarity in MongoRAG ranking
+    "beta": 0.4,    # weight on utility_score (track record) in MongoRAG ranking
+    "change_log": [],
 }
 
-# Runs considered when computing the rolling average
-WINDOW = 10
+# Average tokens per episode above which the policy tightens. The demo's
+# simulated episodes use ~15-25k tokens. A real planner/executor run can use
+# hundreds of thousands, so the real budget is a starting placeholder:
+# calibrate it from the tokens_used of a few real runs (edit it in Atlas).
+TOKEN_BUDGETS = {
+    POLICY_REAL: 500_000,
+    POLICY_DEMO: 50_000,
+}
+
+# Which `runs` documents feed each policy
+RUNS_FILTERS = {
+    POLICY_REAL: {"simulated": {"$ne": True}},
+    POLICY_DEMO: {"simulated": True},
+}
 
 
-def get_policy(policy_collection, policy_id: str = POLICY_REAL) -> dict:
-    """Return the policy document for `policy_id`, creating the default one if absent."""
-    doc = policy_collection.find_one({"_id": policy_id})
+def default_policy(policy_id: str = POLICY_REAL) -> dict:
+    return {"_id": policy_id, **DEFAULT_POLICY,
+            "token_budget": TOKEN_BUDGETS[policy_id], "change_log": []}
+
+
+def bootstrap_policy(policy_col: Collection, policy_id: str = POLICY_REAL):
+    """Insert the default policy document if one doesn't exist yet, and add any
+    fields that older documents are missing (e.g. token_budget). Safe to call every run."""
+    defaults = default_policy(policy_id)
+    doc = policy_col.find_one({"_id": policy_id})
     if doc is None:
-        doc = {"_id": policy_id, **DEFAULT_POLICY, "updated_at": time.time()}
-        policy_collection.insert_one(doc)
-    return doc
+        policy_col.insert_one(defaults)
+        return
+    missing = {k: v for k, v in defaults.items() if k not in doc}
+    if missing:
+        policy_col.update_one({"_id": policy_id}, {"$set": missing})
 
 
-def update_policy(policy_collection, runs_collection, policy_id: str = POLICY_REAL) -> dict:
+def get_policy(policy_col: Collection, policy_id: str = POLICY_REAL) -> dict:
+    bootstrap_policy(policy_col, policy_id)
+    return policy_col.find_one({"_id": policy_id})
+
+
+def update_policy(policy_col: Collection, runs_col: Collection,
+                   policy_id: str = POLICY_REAL, window: int = 10):
     """
-    React to the last WINDOW runs' token usage against `token_budget` and
-    adjust the policy in place. Returns the fields that changed (empty dict
-    if nothing changed).
+    Look at the last `window` episodes that belong to this policy (real runs
+    for "global", simulated runs for "demo") and nudge the policy if the
+    harness is blowing its token budget (or comfortably under it). Pure
+    metric-driven -- no LLM call needed, which keeps it fast and reliable
+    to demo live.
     """
-    policy = get_policy(policy_collection, policy_id)
-    token_budget = policy.get("token_budget", DEFAULT_POLICY["token_budget"])
-    recent = list(
-        runs_collection.find({}, {"tokens_used": 1}).sort("timestamp", -1).limit(WINDOW)
-    )
+    runs_filter = {**RUNS_FILTERS[policy_id], "tokens_used": {"$gt": 0}}
+    recent = list(runs_col.find(runs_filter).sort("timestamp", -1).limit(window))
     if not recent:
-        return {}
+        return None
 
-    avg_tokens = sum(r.get("tokens_used", 0) for r in recent) / len(recent)
-
+    avg_tokens = sum(r["tokens_used"] for r in recent) / len(recent)
+    policy = get_policy(policy_col, policy_id)
+    token_budget = policy["token_budget"]
     changes = {}
-    if avg_tokens > token_budget * 1.2:
-        new_top_k = max(1, policy.get("rag_top_k", 3) - 1)
-        new_inject_every = max(1, policy.get("rag_inject_every", 3) - 1)
-        new_truncate = min(policy.get("truncate_content_chars") or 4000, 2000)
-        if new_top_k != policy.get("rag_top_k"):
-            changes["rag_top_k"] = new_top_k
-        if new_inject_every != policy.get("rag_inject_every"):
-            changes["rag_inject_every"] = new_inject_every
-        if new_truncate != policy.get("truncate_content_chars"):
-            changes["truncate_content_chars"] = new_truncate
-    elif avg_tokens < token_budget * 0.5:
-        if policy.get("rag_top_k", 3) < DEFAULT_POLICY["rag_top_k"]:
-            changes["rag_top_k"] = DEFAULT_POLICY["rag_top_k"]
-        if policy.get("rag_inject_every", 3) < DEFAULT_POLICY["rag_inject_every"]:
-            changes["rag_inject_every"] = DEFAULT_POLICY["rag_inject_every"]
-        if policy.get("truncate_content_chars") is not None:
-            changes["truncate_content_chars"] = None
+
+    if avg_tokens > token_budget:
+        changes["truncate_content_chars"] = max(5000, policy["truncate_content_chars"] - 5000)
+        changes["rag_inject_every"] = max(1, policy["rag_inject_every"] - 1)
+    elif avg_tokens < token_budget * 0.4 and policy["truncate_content_chars"] < 25000:
+        # comfortably under budget -- relax back toward the defaults
+        changes["truncate_content_chars"] = min(25000, policy["truncate_content_chars"] + 5000)
+
+    # Nothing actually moved (e.g. already at the floor): don't bump the version
+    changes = {k: v for k, v in changes.items() if policy[k] != v}
 
     if changes:
-        changes["version"] = policy.get("version", 1) + 1
-        changes["updated_at"] = time.time()
-        policy_collection.update_one({"_id": policy_id}, {"$set": changes})
-
-    return changes
+        changes["version"] = policy["version"] + 1
+        policy_col.update_one({"_id": policy_id}, {
+            "$set": changes,
+            "$push": {"change_log": {
+                "from_version": policy["version"],
+                "reason": f"avg_tokens={avg_tokens:.0f} over last {len(recent)} episodes "
+                          f"(budget {token_budget})",
+                "at": time.time(),
+            }},
+        })
+        return changes
+    return None
