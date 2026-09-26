@@ -8,6 +8,9 @@ Connects to the real Atlas cluster (pentest_memory) and:
     retrieval via MongoRAG, real writes to episodic_log/runs (tagged
     simulated=True), which fire the real outcome-tracking Atlas Trigger,
     followed by a real call to the self-tuning policy update.
+  - runs the REAL agent (run_rag.py, mongo_rag mode, OpenAI models) on a
+    challenge and streams its console output live. Needs Docker, the
+    ctfenv:multiagent image and OPENAI= in keys.cfg.
   - visualizes, round by round, the difference between resending the full
     tool-output history every step (token overload / context bloat) and
     the harness's real sliding-window + truncation approach (bounded).
@@ -17,9 +20,12 @@ Run from the llm_ctf_automation directory:
 Then open http://localhost:8765
 """
 import json
+import os
 import random
 import string
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -37,6 +43,12 @@ NYUCTF_ROOT = Path.home() / ".nyuctf" / "v20250206"
 # How many NYU CTF development-split challenges to show per category
 # (the dev split has 10 each for web/pwn/rev/forensics and 11 for crypto)
 CHALLENGES_PER_CATEGORY = {"web": 10, "pwn": 10, "rev": 10, "crypto": 3, "forensics": 10}
+# Real agent runs (run_rag.py) launched from the webapp
+REAL_AGENT_CONFIG = "configs/rag/mongo_rag_openai_config.yaml"
+REAL_AGENT_IMAGE = "ctfenv:multiagent"
+REAL_AGENT_NETWORK = "ctfnet"
+REAL_AGENT_MAX_COST_CAP = 5.0  # hard ceiling on the per-run budget a viewer can request
+real_run_lock = threading.Lock()  # one real run at a time: each one starts Docker containers
 WINDOW = 5  # matches len_observations default in nyuctf_multiagent/conversation.py
 BASE_OVERHEAD_TOKENS = 480  # rough system prompt + tool schema overhead
 COST_PER_TOKEN = 0.0000005  # matches the blended rate seen in existing runs data
@@ -52,7 +64,14 @@ episodic_col = db["episodic_log"]
 policy_col = db["policy"]
 
 ai_gateway = None
-if "MONGODB_AI_ENDPOINT" in keys and "MONGODB_AI_KEY" in keys:
+if "OPENAI" in keys:
+    try:
+        from mongo.ai_gateway import MongoAIGateway
+        # OpenAI-compatible client; the gateway appends /v1 to the endpoint
+        ai_gateway = MongoAIGateway("https://api.openai.com", keys["OPENAI"])
+    except Exception:
+        ai_gateway = None
+elif "MONGODB_AI_ENDPOINT" in keys and "MONGODB_AI_KEY" in keys:
     try:
         from mongo.ai_gateway import MongoAIGateway
         ai_gateway = MongoAIGateway(keys["MONGODB_AI_ENDPOINT"], keys["MONGODB_AI_KEY"])
@@ -84,6 +103,7 @@ def load_challenges():
                 pass
         challenges.append({
             "id": key,
+            "path": meta["path"],
             "year": meta["year"],
             "event": meta["event"],
             "category": meta["category"],
@@ -341,6 +361,96 @@ def api_simulate_stream():
             "final_memory_context": memory_totals[-1],
             "policy_change": policy_change,
         })
+
+    return Response(generate(), mimetype="text/event-stream")
+
+
+def docker_preflight():
+    """Return why Docker isn't ready for a real run, or None if it is."""
+    def ok(cmd):
+        return subprocess.run(cmd, capture_output=True, text=True).returncode == 0
+    try:
+        if not ok(["docker", "info"]):
+            return "Docker daemon is not running. Start Docker and try again."
+    except FileNotFoundError:
+        return "docker CLI not found on PATH."
+    if not ok(["docker", "image", "inspect", REAL_AGENT_IMAGE]):
+        return (f"Agent image {REAL_AGENT_IMAGE} is not built. Run: "
+                f"docker build -t {REAL_AGENT_IMAGE} docker/multiagent")
+    if not ok(["docker", "network", "inspect", REAL_AGENT_NETWORK]):
+        if not ok(["docker", "network", "create", REAL_AGENT_NETWORK]):
+            return f"Could not create Docker network {REAL_AGENT_NETWORK}."
+    return None
+
+
+def ensure_challenge_files(chal_path):
+    """The dataset is sparse-checked-out with only JSON files; pull this
+    challenge's full directory (binaries, docker-compose.yml, ...) on demand."""
+    pattern = f"{chal_path}/*"
+    # protectNTFS=false: some unrelated dataset paths contain '?' (invalid on Windows)
+    git = ["git", "-C", str(NYUCTF_ROOT), "-c", "core.protectNTFS=false"]
+    listed = subprocess.run(git + ["sparse-checkout", "list"], capture_output=True, text=True).stdout.split()
+    if pattern not in listed:
+        subprocess.run(git + ["sparse-checkout", "add", pattern], capture_output=True, text=True)
+    return (NYUCTF_ROOT / chal_path / "challenge.json").exists()
+
+
+@app.get("/api/run/stream")
+def api_run_stream():
+    """Run the real agent (run_rag.py) on one challenge and stream its output."""
+    challenge = CHALLENGES_BY_ID.get(request.args.get("challenge", ""))
+    if challenge is None:
+        return jsonify({"error": "unknown challenge id"}), 404
+    try:
+        max_cost = min(max(float(request.args.get("max_cost", 1.0)), 0.05), REAL_AGENT_MAX_COST_CAP)
+    except ValueError:
+        max_cost = 1.0
+
+    def generate():
+        if not real_run_lock.acquire(blocking=False):
+            yield sse("failed", {"message": "Another real agent run is already in progress."})
+            return
+        proc = None
+        try:
+            if not keys.get("OPENAI"):
+                yield sse("failed", {"message": "OPENAI= is missing in keys.cfg."})
+                return
+            yield sse("log", {"line": "Checking Docker..."})
+            err = docker_preflight()
+            if err:
+                yield sse("failed", {"message": err})
+                return
+            yield sse("log", {"line": f"Fetching challenge files for {challenge['path']}..."})
+            if not ensure_challenge_files(challenge["path"]):
+                yield sse("failed", {"message": f"Could not check out {challenge['path']} from the dataset."})
+                return
+
+            started = time.time()
+            cmd = [sys.executable, "-u", "run_rag.py",
+                   "--challenge", challenge["id"], "--split", "development",
+                   "--rag-mode", "mongo_rag", "--config", REAL_AGENT_CONFIG,
+                   "--max-cost", str(max_cost), "--logdir", "trajectories/webapp"]
+            env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "COLUMNS": "120"}
+            proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                    errors="replace", bufsize=1)
+            yield sse("start", {"challenge": challenge, "max_cost": max_cost,
+                                "command": " ".join(cmd[1:])})
+            for line in proc.stdout:
+                yield sse("log", {"line": line.rstrip("\n")})
+            proc.wait()
+
+            # run_rag.py inserts exactly one `runs` doc at the end of a mongo_rag episode
+            run_doc = runs_col.find_one(
+                {"timestamp": {"$gte": started}, "simulated": {"$ne": True}},
+                {"_id": 0}, sort=[("timestamp", -1)],
+            )
+            yield sse("done", {"exit_code": proc.returncode, "run": run_doc})
+        finally:
+            # Viewer closed the stream: stop the agent instead of letting it keep spending
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+            real_run_lock.release()
 
     return Response(generate(), mimetype="text/event-stream")
 

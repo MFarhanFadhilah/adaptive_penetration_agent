@@ -130,13 +130,14 @@ async function showLearning(usedDocIds) {
 }
 
 async function refreshRuns() {
-  const r = await fetch("/api/runs?simulated=1&limit=25");
+  const r = await fetch("/api/runs?simulated=0&limit=25");
   const runs = await r.json();
   const rows = document.getElementById("runs-rows");
   rows.innerHTML = "";
   for (const run of runs) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${run.challenge}</td><td>${run.category}</td>` +
+    const kind = run.simulated ? '<span class="muted">sim</span>' : '<span class="tag-real">real</span>';
+    tr.innerHTML = `<td>${run.challenge} ${kind}</td><td>${run.category}</td>` +
       `<td class="${run.solved ? "solved-yes" : "solved-no"}">${run.solved ? "yes" : "no"}</td>` +
       `<td>${run.tokens_used}</td><td>$${run.cost}</td><td>${fmtTime(run.timestamp)}</td>`;
     rows.appendChild(tr);
@@ -163,9 +164,96 @@ function selectChallenge(c, el) {
   selectedChallenge = c;
   document.querySelectorAll(".challenge-card").forEach(x => x.classList.remove("selected"));
   el.classList.add("selected");
-  const btn = document.getElementById("run-btn");
-  btn.disabled = false;
-  btn.textContent = `Run simulation: ${c.name}`;
+  setRunButtons(false);
+}
+
+function setRunButtons(running) {
+  const real = document.getElementById("real-btn");
+  const sim = document.getElementById("run-btn");
+  real.disabled = running || !selectedChallenge;
+  sim.disabled = running || !selectedChallenge;
+  if (!selectedChallenge) return;
+  real.textContent = running ? "Running…" : `Run real agent: ${selectedChallenge.name}`;
+  sim.textContent = running ? "Running…" : "Simulate";
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Highlight the harness lines that matter for the MongoDB story
+function realLineClass(line) {
+  if (line.startsWith("[Mongo-RAG]")) return "log-hint";
+  if (line.startsWith("[Policy]") || line.startsWith("[RAG Mode")) return "log-learn";
+  return "";
+}
+
+function runReal() {
+  if (!selectedChallenge || evtSource) return;
+  const maxCost = document.getElementById("max-cost").value || "1.0";
+  if (!confirm(`Run the real agent on ${selectedChallenge.name}?
+
+This starts Docker containers and uses your OpenAI API key (budget: $${maxCost}). It can take several minutes.`)) return;
+  document.getElementById("log").innerHTML = "";
+  document.getElementById("summary-card").hidden = true;
+  resetChart();
+  memorySnapshot = currentMemory.map((d) => ({ ...d }));
+  setRunButtons(true);
+
+  evtSource = new EventSource(`/api/run/stream?challenge=${encodeURIComponent(selectedChallenge.id)}&max_cost=${encodeURIComponent(maxCost)}`);
+  let finished = false;
+
+  const finish = () => {
+    finished = true;
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    setRunButtons(false);
+  };
+
+  evtSource.addEventListener("start", (e) => {
+    const d = JSON.parse(e.data);
+    log(`<b>Real agent started</b> — <code>${escapeHtml(d.command)}</code> (budget $${d.max_cost})`);
+  });
+
+  evtSource.addEventListener("log", (e) => {
+    const d = JSON.parse(e.data);
+    log(`<span class="log-raw">${escapeHtml(d.line)}</span>`, realLineClass(d.line));
+  });
+
+  evtSource.addEventListener("failed", (e) => {
+    const d = JSON.parse(e.data);
+    log(`<span style="color:#f56565"><b>Cannot run:</b> ${escapeHtml(d.message)}</span>`);
+    finish();
+  });
+
+  evtSource.addEventListener("done", (e) => {
+    const d = JSON.parse(e.data);
+    const run = d.run;
+    finish();
+    const card = document.getElementById("summary-card");
+    card.hidden = false;
+    if (!run) {
+      document.getElementById("summary").innerHTML =
+        `<div>Agent exited with code ${d.exit_code} before writing a result to Atlas — see the log above.</div>`;
+      return;
+    }
+    document.getElementById("summary").innerHTML = `
+      <div>Solved: <span class="${run.solved ? "solved-yes" : "solved-no"}">${run.solved ? "YES" : "NO"}</span> <span class="tag-real">real agent run</span></div>
+      <div>Tokens: <b>${run.tokens_used}</b> (input ${run.input_tokens}, output ${run.output_tokens})</div>
+      <div>Cost: $${Number(run.cost).toFixed(4)}</div>
+      <div>Memory docs used (real Atlas doc_ids): ${run.used_doc_ids.length ? run.used_doc_ids.join(", ") : "none"}</div>
+      <div>Policy version at start: v${run.policy_version}</div>
+    `;
+    log(`<b>Episode finished — written to Atlas runs collection, outcome trigger fired for: ${run.used_doc_ids.join(", ") || "none"}</b>`);
+    showLearning(run.used_doc_ids);
+    refreshRuns();
+    refreshMemory();
+  });
+
+  evtSource.onerror = () => {
+    if (finished) return;
+    log(`<span style="color:#f56565">Stream closed unexpectedly — the agent was stopped.</span>`);
+    finish();
+  };
 }
 
 function log(html, cls) {
@@ -226,9 +314,7 @@ function runSimulation() {
   resetChart();
   memorySnapshot = currentMemory.map((d) => ({ ...d }));
 
-  const btn = document.getElementById("run-btn");
-  btn.disabled = true;
-  btn.textContent = "Running…";
+  setRunButtons(true);
 
   evtSource = new EventSource(`/api/simulate/stream?challenge=${encodeURIComponent(selectedChallenge.id)}`);
 
@@ -276,9 +362,7 @@ function runSimulation() {
     log(`<b>Episode finished — written to Atlas runs collection (simulated=true), outcome trigger fired for: ${d.used_doc_ids.join(", ") || "none"}</b>`);
     evtSource.close();
     evtSource = null;
-    const btn = document.getElementById("run-btn");
-    btn.disabled = false;
-    btn.textContent = `Run simulation: ${selectedChallenge.name}`;
+    setRunButtons(false);
     showLearning(d.used_doc_ids);
     refreshRuns();
   });
@@ -286,15 +370,13 @@ function runSimulation() {
   evtSource.onerror = () => {
     log(`<span style="color:#f56565">Stream error / closed.</span>`);
     if (evtSource) { evtSource.close(); evtSource = null; }
-    const btn = document.getElementById("run-btn");
-    btn.disabled = false;
-    btn.textContent = `Run simulation: ${selectedChallenge.name}`;
+    setRunButtons(false);
   };
 }
 
 async function resetMemory() {
   if (evtSource) {
-    alert("Wait for the current simulation to finish before resetting.");
+    alert("Wait for the current run to finish before resetting.");
     return;
   }
   if (!confirm("Reset memory?\n\n• utility scores back to 0.5\n• simulated runs and episodic logs deleted\n• policy back to defaults\n\nThe 18 knowledge documents are kept.")) return;
@@ -325,6 +407,7 @@ async function resetMemory() {
 }
 
 document.getElementById("run-btn").addEventListener("click", runSimulation);
+document.getElementById("real-btn").addEventListener("click", runReal);
 document.getElementById("reset-btn").addEventListener("click", resetMemory);
 
 refreshStatus();

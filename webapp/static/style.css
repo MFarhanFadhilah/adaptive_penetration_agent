@@ -151,3 +151,9 @@ button:disabled { background: #333a44; color: var(--muted); cursor: not-allowed;
 @keyframes flash-up { from { background: rgba(72,187,120,0.35); } }
 @keyframes flash-down { from { background: rgba(245,101,101,0.35); } }
 .log-learn { color: var(--good); }
+
+.run-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.run-controls input { width: 70px; }
+.btn-secondary { opacity: 0.8; }
+.log-raw { font-family: monospace; white-space: pre-wrap; font-size: 12px; }
+.tag-real { color: #4fd1c5; font-weight: bold; }

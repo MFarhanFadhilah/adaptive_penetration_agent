@@ -37,7 +37,7 @@
       </div>
 
       <div class="card">
-        <h3>Recent runs <span class="muted">(runs collection, simulated=true)</span></h3>
+        <h3>Recent runs <span class="muted">(runs collection — real agent and simulated)</span></h3>
         <table class="data-table">
           <thead><tr><th>challenge</th><th>category</th><th>solved</th><th>tokens</th><th>cost</th><th>when</th></tr></thead>
           <tbody id="runs-rows"></tbody>
@@ -46,10 +46,15 @@
     </section>
 
     <section class="panel" id="right-panel">
-      <h2>Simulate a run</h2>
+      <h2>Run a challenge</h2>
       <div class="card">
         <div id="challenge-grid" class="challenge-grid"></div>
-        <button id="run-btn" disabled>Select a challenge to run</button>
+        <div class="run-controls">
+          <button id="real-btn" disabled>Select a challenge to run</button>
+          <label class="muted">max cost $<input id="max-cost" type="number" min="0.05" max="5" step="0.05" value="1.00" /></label>
+          <button id="run-btn" class="btn-secondary" disabled>Simulate</button>
+        </div>
+        <div class="muted">Real agent: runs run_rag.py with OpenAI models inside Docker — takes minutes and spends real API credit. Simulate: fake tools/outputs, real Atlas memory.</div>
       </div>
 
       <div class="card">
