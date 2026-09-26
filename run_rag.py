@@ -5,6 +5,8 @@ Supports three modes:
   --rag-mode self_rag   : Uses Self-RAG (BM25 retrieval + LLM self-critique)
   --rag-mode graph_rag  : Uses Graph-RAG (knowledge graph multi-hop traversal)
   --rag-mode combined   : Uses both Self-RAG and Graph-RAG together
+  --rag-mode mongo_rag  : Uses MongoDB Atlas Vector Search; RAG settings are read
+                          from the self-tuning `policy` document in Atlas
 
 Example:
   python run_rag.py --challenge 2023q-rev-baby_s_third --split test \\
@@ -46,8 +48,8 @@ parser.add_argument(
 )
 parser.add_argument(
     "--rag-mode", default=None,
-    choices=["self_rag", "graph_rag", "combined"],
-    help="RAG mode: self_rag, graph_rag, or combined (default: config's rag.mode, else self_rag)"
+    choices=["self_rag", "graph_rag", "mongo_rag", "combined"],
+    help="RAG mode: self_rag, graph_rag, mongo_rag, or combined (default: config's rag.mode, else self_rag)"
 )
 parser.add_argument("--planner-model", default=None)
 parser.add_argument("--executor-model", default=None)
@@ -56,7 +58,7 @@ parser.add_argument("--max-cost", default=0.0, type=float)
 parser.add_argument("--enable-autoprompt", action="store_true")
 parser.add_argument("--strict", action="store_true")
 # RAG settings default to None so an explicit CLI value can be told apart from
-# "not given". Precedence: CLI > YAML > default.
+# "not given". Precedence: CLI > Mongo policy (mongo_rag mode) > YAML > default.
 parser.add_argument("--rag-relevance-threshold", default=None, type=float,
                     help="Self-RAG relevance threshold (0-10), default 5.0")
 parser.add_argument("--rag-top-k", default=None, type=int,
@@ -69,9 +71,9 @@ parser.add_argument("--rag-inject-every", default=None, type=int,
 args = parser.parse_args()
 
 
-def resolve_setting(cli_value, yaml_value, default):
-    """First value that was actually set wins: CLI > YAML > default."""
-    for value in (cli_value, yaml_value):
+def resolve_setting(cli_value, policy_value, yaml_value, default):
+    """First value that was actually set wins: CLI > Mongo policy > YAML > default."""
+    for value in (cli_value, policy_value, yaml_value):
         if value is not None:
             return value
     return default
@@ -106,6 +108,7 @@ else:
         "self_rag": "self_rag_config.yaml",
         "graph_rag": "graph_rag_config.yaml",
         "combined": "combined_rag_config.yaml",
+        "mongo_rag": "self_rag_config.yaml",  # same models/prompts; RAG settings come from the Mongo policy
     }
     config_f = config_d / config_map[args.rag_mode or "self_rag"]
 
@@ -126,17 +129,36 @@ except Exception:
 
 keys = APIKeys(args.keys)
 
-rag_mode = resolve_setting(args.rag_mode, rag_cfg.get("mode"), "self_rag")
+rag_mode = resolve_setting(args.rag_mode, None, rag_cfg.get("mode"), "self_rag")
 
-relevance_threshold = resolve_setting(args.rag_relevance_threshold, rag_cfg.get("relevance_threshold"), 5.0)
-top_k = resolve_setting(args.rag_top_k, rag_cfg.get("top_k"), 3)
+# In mongo_rag mode the harness settings live in the `policy` document in Atlas
+# (see mongo/policy.py), which update_policy() rewrites from measured outcomes.
+policy = {}
+mongo_db = None
+if rag_mode == "mongo_rag":
+    from pymongo import MongoClient
+    from mongo.policy import get_policy
+
+    mongo_db = MongoClient(keys["MONGODB_URI"])["pentest_memory"]
+    policy = get_policy(mongo_db["policy"])
+
+relevance_threshold = resolve_setting(args.rag_relevance_threshold, None, rag_cfg.get("relevance_threshold"), 5.0)
+top_k = resolve_setting(args.rag_top_k, policy.get("rag_top_k"), rag_cfg.get("top_k"), 3)
 max_hints_per_round = rag_cfg.get("max_hints_per_round", 2)
-max_hops = resolve_setting(args.rag_max_hops, rag_cfg.get("max_hops"), 3)
+max_hops = resolve_setting(args.rag_max_hops, None, rag_cfg.get("max_hops"), 3)
 max_graph_hints = rag_cfg.get("max_hints", 3)
-inject_every = resolve_setting(args.rag_inject_every, rag_cfg.get("inject_every"), 3)
-truncate_content = rag_cfg.get("truncate_content_chars")  # None -> keep Conversation's default
+inject_every = resolve_setting(args.rag_inject_every, policy.get("rag_inject_every"), rag_cfg.get("inject_every"), 3)
+alpha = policy.get("alpha", 0.6)
+beta = policy.get("beta", 0.4)
+truncate_content = policy.get("truncate_content_chars")  # None -> keep Conversation's default
 
 logger.print(f"[RAG Mode: {rag_mode.upper()}]", force=True)
+if policy:
+    logger.print(
+        f"[Policy] v{policy['version']} loaded from Atlas: top_k={top_k}, inject_every={inject_every}, "
+        f"truncate={truncate_content}, alpha={alpha}, beta={beta}",
+        force=True
+    )
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -170,6 +192,28 @@ if rag_mode in ("graph_rag", "combined"):
     graph_rag = GraphRAG(max_hops=max_hops, max_hints=max_graph_hints)
     logger.print(
         f"[Graph-RAG] Initialized: {graph_rag.describe_graph()}",
+        force=True
+    )
+
+mongo_rag = None
+runs_collection = None
+policy_collection = None
+
+if rag_mode in ("mongo_rag",):
+    from mongo.mongo_rag import MongoRAG, INDEX_NAME as MONGO_RAG_INDEX_NAME
+
+    mongo_rag = MongoRAG(
+        collection=mongo_db["semantic_memory"],
+        top_k=top_k,
+        alpha=alpha,
+        beta=beta,
+        max_hints_per_round=max_hints_per_round,
+        inject_every=inject_every,
+    )
+    runs_collection = mongo_db["runs"]
+    policy_collection = mongo_db["policy"]
+    logger.print(
+        f"[Mongo-RAG] Initialized: top_k={top_k}, index={MONGO_RAG_INDEX_NAME}",
         force=True
     )
 
@@ -254,6 +298,11 @@ with RAGPlannerExecutorSystem(
     executor_b=executor_b,
     self_rag=self_rag,
     graph_rag=graph_rag,
+    mongo_rag=mongo_rag,
+    runs_collection=runs_collection,
+    policy_collection=policy_collection,
+    policy_version=policy.get("version"),
+    episodic_collection=mongo_db["episodic_log"] if rag_mode == "mongo_rag" else None,
     rag_inject_every=inject_every,
     mode=rag_mode,
 ) as system:
