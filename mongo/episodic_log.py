@@ -1,30 +1,83 @@
 """
-Episodic log for Mongo-RAG.
+Episodic log: append-only record of every tool call/result, written to
+MongoDB instead of only living in the live prompt.
 
-Stores the full, untruncated result of every tool call in an episode
-(planner, autoprompter, and every executor) in the `episodic_log` collection,
-keyed by `episode_id`. The in-conversation window only ever sees a truncated
-version of each result (see Conversation.truncate_content); this is the raw
-material that outcome tracking and the demo webapp read back from Atlas.
+nyuctf_multiagent/conversation.py already truncates what the model sees
+(truncate_content, len_observations) to protect the context window -- this
+module doesn't change that. It just means nothing is actually lost when the
+conversation truncates it: the full, untruncated result is preserved here,
+out of the LLM's context but still queryable.
+
+Hook point: BaseAgent.add_observation_message() in nyuctf_multiagent/agent.py
+calls the agent's `observation_logger` *before* Conversation.append_observation()
+truncates the result in place. RAGPlannerExecutorSystem attaches an
+EpisodicLogger to every agent in mongo_rag mode.
 """
+import json
 import time
+from pymongo.collection import Collection
+
+# A MongoDB document is capped at 16MB; keep each logged output well under it
+MAX_LOGGED_CHARS = 1_000_000
+
+
+def _as_text(result) -> str:
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result, default=str)
+    except (TypeError, ValueError):
+        return str(result)
 
 
 class EpisodicLogger:
-    def __init__(self, collection, episode_id: str):
+    """Writes one `episodic_log` document per tool result of one episode."""
+
+    def __init__(self, collection: Collection, episode_id: str):
         self.collection = collection
         self.episode_id = episode_id
         self.count = 0
+        self.failed = False
+        try:
+            self.collection.create_index([("episode_id", 1), ("seq", 1)])
+        except Exception:
+            pass  # index is an optimisation only
 
-    def log(self, agent_role, round_num, tool_name, tool_call_id, result, prompt_limit_chars):
-        self.collection.insert_one({
+    def log(self, agent_role: str, round_num: int, tool_name: str, tool_call_id,
+            result, prompt_limit_chars: int = None):
+        full_output = _as_text(result)
+        doc = {
             "episode_id": self.episode_id,
-            "agent_role": agent_role,
+            "seq": self.count,
             "round": round_num,
-            "tool_name": tool_name,
+            "agent_role": agent_role,
+            "tool": tool_name,
             "tool_call_id": tool_call_id,
-            "result": result,
-            "prompt_limit_chars": prompt_limit_chars,
+            "full_output": full_output[:MAX_LOGGED_CHARS],
+            "output_chars": len(full_output),
+            # True when the LLM only saw a cut-down version of this output
+            "truncated_in_prompt": prompt_limit_chars is not None and len(full_output) > prompt_limit_chars,
+            "stored_truncated": len(full_output) > MAX_LOGGED_CHARS,
             "timestamp": time.time(),
-        })
-        self.count += 1
+        }
+        try:
+            self.collection.insert_one(doc)
+            self.count += 1
+        except Exception as e:
+            # Logging must never take the agent down; report once and carry on
+            if not self.failed:
+                self.failed = True
+                print(f"[Episodic log] write to MongoDB failed, continuing without it: {e}")
+
+
+def log_tool_result(collection: Collection, episode_id: str, round_num: int,
+                     tool_name: str, full_output, agent_role: str = "executor"):
+    """One-off helper kept for scripts; the agent uses EpisodicLogger."""
+    collection.insert_one({
+        "episode_id": episode_id,
+        "round": round_num,
+        "agent_role": agent_role,
+        "tool": tool_name,
+        "full_output": _as_text(full_output),
+        "timestamp": time.time(),
+    })
