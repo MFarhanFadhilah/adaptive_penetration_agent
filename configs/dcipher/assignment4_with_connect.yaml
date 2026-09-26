@@ -1,0 +1,69 @@
+# Assignment 4 Configuration - WITH Connect Tools
+# Planner + 2 Executors with Interactive Network Tools
+
+experiment:
+  max_cost: 2.0
+  enable_autoprompt: False
+
+planner:
+  max_rounds: 30
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  prompt: prompts/dual_planner_prompt.yaml
+  toolset:
+    - run_command
+    - submit_flag
+    - giveup
+    - delegate
+
+# Executor A: General-purpose with Connect Tools
+executor:
+  max_rounds: 50
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  len_observations: 5
+  prompt: prompts/executor_a_connect_prompt.yaml
+  toolset:
+    - run_command
+    - finish_task
+    - create_file
+    - connect_to_server
+    - connect_disconnect
+    - connect_readline
+    - connect_sendline
+    - connect_read_all
+
+# Executor B: Binary analysis specialist with Connect Tools
+executor_b:
+  max_rounds: 50
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  len_observations: 5
+  prompt: prompts/executor_b_connect_prompt.yaml
+  toolset:
+    - run_command
+    - finish_task
+    - disassemble
+    - decompile
+    - create_file
+    - connect_to_server
+    - connect_disconnect
+    - connect_readline
+    - connect_sendline
+    - connect_read_all
+
+autoprompter:
+  max_rounds: 5
+  model: gemini-2.5-flash
+  temperature: 1.0
+  max_tokens: 8192
+  prompt: prompts/autoprompt_prompt.yaml
+  toolset:
+    - run_command
+    - generate_prompt
