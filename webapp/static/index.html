@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CTF Agent Memory Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Self-Evolving CTF Agent — MongoDB Atlas Memory Demo</h1>
+    <div id="status-bar" class="status-bar">
+      <span id="atlas-status" class="badge badge-pending">Atlas: checking…</span>
+      <span id="gateway-status" class="badge badge-pending">AI Gateway: checking…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="left-panel">
+      <div class="panel-head">
+        <h2>Live Atlas Memory</h2>
+        <button id="reset-btn" class="btn-danger" title="Reset utility scores and policy, delete simulated runs and logs">Reset memory</button>
+      </div>
+      <div id="reset-msg" class="muted" hidden></div>
+
+      <div class="card">
+        <h3>Self-tuning policy <span class="muted">(policy collection, _id "demo" — the real agent uses its own "global" policy)</span></h3>
+        <table id="policy-table" class="kv-table"></table>
+      </div>
+
+      <div class="card">
+        <h3>Semantic memory <span class="muted">(semantic_memory, ranked by utility_score)</span></h3>
+        <table class="data-table">
+          <thead><tr><th>doc_id</th><th>category</th><th>title</th><th>retrieved</th><th>success</th><th>utility</th><th>last run</th></tr></thead>
+          <tbody id="memory-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>Recent runs <span class="muted">(runs collection, simulated=true)</span></h3>
+        <table class="data-table">
+          <thead><tr><th>challenge</th><th>category</th><th>solved</th><th>tokens</th><th>cost</th><th>when</th></tr></thead>
+          <tbody id="runs-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="right-panel">
+      <h2>Simulate a run</h2>
+      <div class="card">
+        <div id="challenge-grid" class="challenge-grid"></div>
+        <button id="run-btn" disabled>Select a challenge to run</button>
+      </div>
+
+      <div class="card">
+        <h3>Context size per round <span class="muted">(estimated tokens sent to the LLM that round)</span></h3>
+        <canvas id="chart" width="640" height="260"></canvas>
+        <div class="legend">
+          <span><i class="dot dot-naive"></i> Without memory (full history resent every round)</span>
+          <span><i class="dot dot-memory"></i> With MongoDB memory (sliding window + RAG hints only)</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Live episode log</h3>
+        <div id="log" class="log"></div>
+      </div>
+
+      <div class="card" id="summary-card" hidden>
+        <h3>Episode result</h3>
+        <div id="summary"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
