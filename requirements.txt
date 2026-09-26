@@ -1,0 +1,24 @@
+# rich
+# ruamel.yaml
+# bs4
+# ToolDefGenerator @ git+https://github.com/moyix/ToolDefGenerator@main
+# jinja2
+# docker
+# lxml
+# tabulate
+# backoff
+# pyte
+# tiktoken
+# nyuctf
+# together
+pathlib
+rich
+pyyaml
+docker
+tabulate
+backoff
+pyte
+tiktoken
+nyuctf
+google-generativeai
+together
