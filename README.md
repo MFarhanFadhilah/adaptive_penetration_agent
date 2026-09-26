@@ -1,5 +1,7 @@
 # Adaptive Pentesting Agent (APA)
 
+**[🌐 Live Demo](http://68.183.156.243:8898/)**
+
 The multi-agent CTF harness that everything else builds on. It runs the agent
 (a planner and two executors) that solves CTF challenges inside a Docker
 sandbox, with a pluggable RAG layer for injecting knowledge hints.
