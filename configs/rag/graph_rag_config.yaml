@@ -1,0 +1,61 @@
+experiment:
+  max_cost: 2.0
+  enable_autoprompt: false
+
+planner:
+  max_rounds: 30
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  prompt: prompts/rag_planner_prompt.yaml
+  toolset:
+    - run_command
+    - submit_flag
+    - giveup
+    - delegate
+
+executor:
+  max_rounds: 50
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  len_observations: 5
+  prompt: prompts/rag_executor_a_prompt.yaml
+  toolset:
+    - run_command
+    - finish_task
+    - create_file
+
+executor_b:
+  max_rounds: 50
+  model: gemini-2.5-flash
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 8192
+  len_observations: 5
+  prompt: prompts/rag_executor_b_prompt.yaml
+  toolset:
+    - run_command
+    - finish_task
+    - disassemble
+    - decompile
+    - create_file
+
+autoprompter:
+  max_rounds: 5
+  model: gemini-2.5-flash
+  temperature: 1.0
+  max_tokens: 8192
+  prompt: prompts/autoprompt_prompt.yaml
+  toolset:
+    - run_command
+    - generate_prompt
+
+# Graph-RAG specific settings
+rag:
+  mode: graph_rag
+  max_hops: 3
+  max_hints: 3
+  inject_every: 3
